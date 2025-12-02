@@ -1,15 +1,16 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-INVENTUR-PROGRAMM FÜR FORBO MOVEMENT SYSTEMS
-===========================================
+INVENTUR-PROGRAMM V2 FÜR FORBO MOVEMENT SYSTEMS
+===============================================
 
 Desktop-Anwendung für Lagerpflege/Inventur mit Barcodescanner-Integration
+Unterstützt Rollen UND Granulate mit separaten Excel-Dateien
 Entwickelt für Windows 11, Python 3.11+
 
 Autor: Cascade AI
-Datum: November 2024
-Version: 1.0
+Datum: Dezember 2024
+Version: 2.0
 """
 
 import tkinter as tk
@@ -54,11 +55,13 @@ class InventurApp:
         self.data_dir = Path('data')
         self.config_dir = Path('config')
         self.arbeitstabelle_path = self.data_dir / 'Arbeitstabelle.xlsx'
-        self.inventur_path = self.data_dir / 'Inventur.xlsx'
+        self.inventur_rollen_path = self.data_dir / 'Inventur_Rollen.xlsx'
+        self.inventur_granulat_path = self.data_dir / 'Inventur_Granulat.xlsx'
         
         # Erstelle Verzeichnisse falls nicht vorhanden
         self.data_dir.mkdir(exist_ok=True)
         self.config_dir.mkdir(exist_ok=True)
+        (self.data_dir / 'backups').mkdir(exist_ok=True)
     
     def load_config(self):
         """Lädt die Konfigurationsdatei"""
@@ -69,6 +72,10 @@ class InventurApp:
             "farbe_gefunden": "#E8F5E8",
             "farbe_nicht_gefunden": "#FFF2CC",
             "farbe_fehler": "#FFE6E6",
+            "farbe_rolle_bg": "#E3F2FD",
+            "farbe_rolle_text": "#1976D2",
+            "farbe_granulat_bg": "#FFF9C4",
+            "farbe_granulat_text": "#F57F17",
             "vollbild": True
         }
         
@@ -94,41 +101,90 @@ class InventurApp:
     
     def init_data(self):
         """Initialisiert die Datenstrukturen"""
-        self.df_arbeitstabelle = None
-        self.inventur_data = []
-        self.nicht_gefunden_data = []
+        # Separate DataFrames für Rollen und Granulat
+        self.df_rollen = None
+        self.df_granulate = None
+        
+        # Separate Listen für Inventur-Daten
+        self.inventur_rollen_data = []
+        self.inventur_granulat_data = []
+        self.nicht_gefunden_rollen_data = []
+        self.nicht_gefunden_granulat_data = []
+        
         self.current_scan = None
+        self.current_type = None  # 'ROLLE' oder 'GRANULAT'
         self.undo_stack = []
         
         # Lade Arbeitstabelle
         self.load_arbeitstabelle()
     
     def load_arbeitstabelle(self):
-        """Lädt die Arbeitstabelle in ein DataFrame"""
+        """Lädt die Arbeitstabelle mit zwei Tabellenblättern (Rollen und Granulate)"""
         try:
             if self.arbeitstabelle_path.exists():
-                # Lade Excel mit Charge als Text (behält führende Nullen)
-                self.df_arbeitstabelle = pd.read_excel(self.arbeitstabelle_path, dtype={'Charge': str})
-                
-                # Stelle sicher, dass Charge-Spalte als String formatiert ist
-                if 'Charge' in self.df_arbeitstabelle.columns:
-                    self.df_arbeitstabelle['Charge'] = self.df_arbeitstabelle['Charge'].astype(str)
-                
-                self.logger.info(f"Arbeitstabelle geladen: {len(self.df_arbeitstabelle)} Artikel")
-                
-                # Prüfe erforderliche Spalten
-                required_columns = ['Charge', 'Material', 'Materialkurztext', 'Länge m', 'Breite mm', 'Frei verwendbar']
-                missing_columns = [col for col in required_columns if col not in self.df_arbeitstabelle.columns]
-                
-                if missing_columns:
-                    messagebox.showerror("Fehler", f"Fehlende Spalten in Arbeitstabelle: {', '.join(missing_columns)}")
+                # Prüfe ob beide Tabellenblätter vorhanden sind
+                try:
+                    excel_file = pd.ExcelFile(self.arbeitstabelle_path)
+                    available_sheets = excel_file.sheet_names
+                    
+                    if 'Rollen' not in available_sheets or 'Granulate' not in available_sheets:
+                        messagebox.showerror("Fehler", 
+                            f"⚠️ FEHLER: Arbeitstabelle.xlsx muss zwei Tabellenblätter haben:\n"
+                            f"- 'Rollen'\n"
+                            f"- 'Granulate'\n\n"
+                            f"Gefundene Blätter: {', '.join(available_sheets)}\n\n"
+                            f"Bitte überprüfen Sie die Datei.")
+                        sys.exit(1)
+                    
+                    # Lade Rollen-Tabellenblatt
+                    self.df_rollen = pd.read_excel(self.arbeitstabelle_path, sheet_name='Rollen', dtype={'Charge': str})
+                    if 'Charge' in self.df_rollen.columns:
+                        self.df_rollen['Charge'] = self.df_rollen['Charge'].astype(str)
+                    
+                    # Lade Granulate-Tabellenblatt
+                    self.df_granulate = pd.read_excel(self.arbeitstabelle_path, sheet_name='Granulate', dtype={'Charge': str})
+                    if 'Charge' in self.df_granulate.columns:
+                        self.df_granulate['Charge'] = self.df_granulate['Charge'].astype(str)
+                    
+                    # Umbenennen: "Materialnummer" → "Material" (für einheitliche Verarbeitung)
+                    if 'Materialnummer' in self.df_granulate.columns:
+                        self.df_granulate.rename(columns={'Materialnummer': 'Material'}, inplace=True)
+                    
+                    # Prüfe erforderliche Spalten für Rollen
+                    required_rollen_columns = ['Charge', 'Material', 'Materialkurztext', 'Länge m', 'Breite mm', 'Frei verwendbar']
+                    missing_rollen = [col for col in required_rollen_columns if col not in self.df_rollen.columns]
+                    
+                    # Prüfe erforderliche Spalten für Granulate
+                    required_granulate_columns = ['Charge', 'Material', 'Materialkurztext', 'Frei verwendbar']
+                    missing_granulate = [col for col in required_granulate_columns if col not in self.df_granulate.columns]
+                    
+                    if missing_rollen or missing_granulate:
+                        error_msg = "Fehlende Spalten:\n"
+                        if missing_rollen:
+                            error_msg += f"Rollen: {', '.join(missing_rollen)}\n"
+                        if missing_granulate:
+                            error_msg += f"Granulate: {', '.join(missing_granulate)}"
+                        messagebox.showerror("Fehler", error_msg)
+                        sys.exit(1)
+                    
+                    rollen_count = len(self.df_rollen)
+                    granulate_count = len(self.df_granulate)
+                    total_count = rollen_count + granulate_count
+                    
+                    self.logger.info(f"Arbeitstabelle geladen: {rollen_count} Rollen, {granulate_count} Granulate, {total_count} gesamt")
+                    
+                except Exception as e:
+                    messagebox.showerror("Fehler", f"Fehler beim Lesen der Excel-Datei:\n{e}")
                     sys.exit(1)
                     
             else:
                 messagebox.showwarning("Warnung", 
                     f"Arbeitstabelle nicht gefunden!\n\n"
                     f"Bitte kopieren Sie die Arbeitstabelle.xlsx in:\n"
-                    f"{self.arbeitstabelle_path.absolute()}")
+                    f"{self.arbeitstabelle_path.absolute()}\n\n"
+                    f"Die Datei muss zwei Tabellenblätter enthalten:\n"
+                    f"- 'Rollen'\n"
+                    f"- 'Granulate'")
                 
         except Exception as e:
             messagebox.showerror("Fehler", f"Fehler beim Laden der Arbeitstabelle:\n{e}")
@@ -191,8 +247,11 @@ class InventurApp:
         title_label.grid(row=0, column=1)
         
         # Info (rechts)
-        if self.df_arbeitstabelle is not None:
-            info_text = f"Artikel in DB: {len(self.df_arbeitstabelle)}"
+        if self.df_rollen is not None and self.df_granulate is not None:
+            rollen_count = len(self.df_rollen)
+            granulate_count = len(self.df_granulate)
+            total_count = rollen_count + granulate_count
+            info_text = f"DB: {rollen_count} 🔵 Rollen, {granulate_count} 🟨 Granulate ({total_count} gesamt)"
         else:
             info_text = "Keine Arbeitstabelle"
         
@@ -292,36 +351,144 @@ class InventurApp:
         self.input_start_row = row
     
     def create_input_fields(self):
-        """Erstellt die Eingabefelder für Fach und Bemerkung"""
-        row = self.input_start_row
-        
-        # Fach-Eingabe
-        ttk.Label(self.current_frame, text="🏷️ Fach (Lagerort):", font=("Arial", 11, "bold")).grid(row=row, column=0, sticky=tk.W, pady=5)
+        """Erstellt die Eingabefelder - werden dynamisch je nach Typ angezeigt"""
+        # Initialisiere alle Variablen
         self.fach_var = tk.StringVar()
-        self.fach_entry = ttk.Entry(self.current_frame, 
-                                   textvariable=self.fach_var,
-                                   font=("Arial", 12),
-                                   width=20)
-        self.fach_entry.grid(row=row, column=1, sticky=tk.W, padx=(10, 0), pady=5)
-        self.fach_entry.bind('<Return>', self.save_current_scan)
-        self.fach_entry.bind('<KeyRelease>', self.on_field_change)
+        self.bemerkung_var = tk.StringVar()
+        self.breite_kontrolliert_var = tk.StringVar()
+        self.zahlmenge_var = tk.StringVar()
+        
+        # Container für dynamische Eingabefelder
+        self.input_container = ttk.Frame(self.current_frame)
+        self.input_container.grid(row=self.input_start_row, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=10)
+        self.input_container.columnconfigure(1, weight=1)
+        
+        # Widgets werden dynamisch erstellt
+        self.input_widgets = {}
+    
+    def create_rolle_inputs(self):
+        """Erstellt Eingabefelder für Rollen"""
+        self.clear_input_widgets()
+        row = 0
+        
+        # Fach-Eingabe (PFLICHT)
+        fach_label = ttk.Label(self.input_container, text="🏷️ Fach (Lagerort):", font=("Arial", 11, "bold"))
+        fach_label.grid(row=row, column=0, sticky=tk.W, pady=5)
+        fach_entry = ttk.Entry(self.input_container, 
+                              textvariable=self.fach_var,
+                              font=("Arial", 12),
+                              width=20)
+        fach_entry.grid(row=row, column=1, sticky=tk.W, padx=(10, 0), pady=5)
+        fach_entry.bind('<Return>', self.save_current_scan)
+        fach_entry.bind('<KeyRelease>', self.on_field_change)
+        self.input_widgets['fach_label'] = fach_label
+        self.input_widgets['fach_entry'] = fach_entry
         row += 1
         
-        # Bemerkung-Eingabe
-        ttk.Label(self.current_frame, text="📝 Bemerkung (optional):", font=("Arial", 11, "bold")).grid(row=row, column=0, sticky=tk.W, pady=5)
-        self.bemerkung_var = tk.StringVar()
-        self.bemerkung_entry = ttk.Entry(self.current_frame, 
-                                        textvariable=self.bemerkung_var,
-                                        font=("Arial", 12),
-                                        width=50)
-        self.bemerkung_entry.grid(row=row, column=1, sticky=tk.W, padx=(10, 0), pady=5)
-        self.bemerkung_entry.bind('<Return>', self.save_current_scan)
-        self.bemerkung_entry.bind('<KeyRelease>', self.on_field_change)
+        # Breite kontrolliert (PFLICHT)
+        breite_label = ttk.Label(self.input_container, text="📏 Breite kontrolliert (mm):", font=("Arial", 11, "bold"))
+        breite_label.grid(row=row, column=0, sticky=tk.W, pady=5)
+        breite_entry = ttk.Entry(self.input_container, 
+                                textvariable=self.breite_kontrolliert_var,
+                                font=("Arial", 12),
+                                width=20)
+        breite_entry.grid(row=row, column=1, sticky=tk.W, padx=(10, 0), pady=5)
+        breite_entry.bind('<Return>', self.save_current_scan)
+        breite_entry.bind('<KeyRelease>', self.on_field_change)
+        self.input_widgets['breite_label'] = breite_label
+        self.input_widgets['breite_entry'] = breite_entry
+        row += 1
+        
+        # Bemerkung (optional)
+        bemerkung_label = ttk.Label(self.input_container, text="📝 Bemerkung (optional):", font=("Arial", 11, "bold"))
+        bemerkung_label.grid(row=row, column=0, sticky=tk.W, pady=5)
+        bemerkung_entry = ttk.Entry(self.input_container, 
+                                   textvariable=self.bemerkung_var,
+                                   font=("Arial", 12),
+                                   width=50)
+        bemerkung_entry.grid(row=row, column=1, sticky=tk.W, padx=(10, 0), pady=5)
+        bemerkung_entry.bind('<Return>', self.save_current_scan)
+        bemerkung_entry.bind('<KeyRelease>', self.on_field_change)
+        self.input_widgets['bemerkung_label'] = bemerkung_label
+        self.input_widgets['bemerkung_entry'] = bemerkung_entry
         row += 1
         
         # Speichern-Button
-        save_button = ttk.Button(self.current_frame, text="💾 Speichern", command=self.save_current_scan)
+        save_button = ttk.Button(self.input_container, text="💾 Speichern", command=self.save_current_scan)
         save_button.grid(row=row, column=1, sticky=tk.W, padx=(10, 0), pady=10)
+        self.input_widgets['save_button'] = save_button
+        
+        # Fokus auf Fach-Eingabe
+        fach_entry.focus_set()
+    
+    def create_granulat_inputs(self):
+        """Erstellt Eingabefelder für Granulat"""
+        self.clear_input_widgets()
+        row = 0
+        
+        # Zählmenge (PFLICHT)
+        zahlmenge_label = ttk.Label(self.input_container, text="⚖️ Zählmenge (KG):", font=("Arial", 11, "bold"))
+        zahlmenge_label.grid(row=row, column=0, sticky=tk.W, pady=5)
+        zahlmenge_entry = ttk.Entry(self.input_container, 
+                                   textvariable=self.zahlmenge_var,
+                                   font=("Arial", 12),
+                                   width=20)
+        zahlmenge_entry.grid(row=row, column=1, sticky=tk.W, padx=(10, 0), pady=5)
+        zahlmenge_entry.bind('<Return>', self.save_current_scan)
+        zahlmenge_entry.bind('<KeyRelease>', self.on_field_change)
+        self.input_widgets['zahlmenge_label'] = zahlmenge_label
+        self.input_widgets['zahlmenge_entry'] = zahlmenge_entry
+        row += 1
+        
+        # Bemerkung (optional)
+        bemerkung_label = ttk.Label(self.input_container, text="📝 Bemerkung (optional):", font=("Arial", 11, "bold"))
+        bemerkung_label.grid(row=row, column=0, sticky=tk.W, pady=5)
+        bemerkung_entry = ttk.Entry(self.input_container, 
+                                   textvariable=self.bemerkung_var,
+                                   font=("Arial", 12),
+                                   width=50)
+        bemerkung_entry.grid(row=row, column=1, sticky=tk.W, padx=(10, 0), pady=5)
+        bemerkung_entry.bind('<Return>', self.save_current_scan)
+        bemerkung_entry.bind('<KeyRelease>', self.on_field_change)
+        self.input_widgets['bemerkung_label'] = bemerkung_label
+        self.input_widgets['bemerkung_entry'] = bemerkung_entry
+        row += 1
+        
+        # Speichern-Button
+        save_button = ttk.Button(self.input_container, text="💾 Speichern", command=self.save_current_scan)
+        save_button.grid(row=row, column=1, sticky=tk.W, padx=(10, 0), pady=10)
+        self.input_widgets['save_button'] = save_button
+        
+        # Fokus auf Zählmenge-Eingabe
+        zahlmenge_entry.focus_set()
+    
+    def clear_input_widgets(self):
+        """Löscht alle dynamischen Eingabe-Widgets"""
+        for widget in self.input_widgets.values():
+            widget.destroy()
+        self.input_widgets.clear()
+    
+    def validiere_breite(self, breite_text):
+        """Validiert Breite-Eingabe (1-4 stellige Zahl)"""
+        try:
+            breite = int(breite_text.strip())
+            if 1 <= breite <= 9999:  # 1-4 stellig
+                return True, breite
+            else:
+                return False, "Breite muss zwischen 1 und 9999 mm liegen!"
+        except ValueError:
+            return False, "Breite muss eine gültige Zahl sein!"
+    
+    def validiere_gewicht(self, gewicht_text):
+        """Validiert Gewichts-Eingabe (positive Dezimalzahl)"""
+        try:
+            gewicht = float(gewicht_text.strip().replace(',', '.'))
+            if gewicht > 0:
+                return True, gewicht
+            else:
+                return False, "Zählmenge muss größer als 0 sein!"
+        except ValueError:
+            return False, "Zählmenge muss eine gültige Zahl sein!"
     
     def create_list_section(self):
         """Erstellt die Liste der gescannten Artikel"""
@@ -340,26 +507,24 @@ class InventurApp:
         self.count_label.pack(side=tk.LEFT)
         
         # Treeview für Artikelliste
-        columns = ('Zeit', 'Charge', 'Material', 'Kurztext', 'Fach', 'Bemerkung', 'Status')
+        columns = ('Zeit', 'Charge', 'Material', 'Typ', 'Fach', 'Status')
         self.tree = ttk.Treeview(list_frame, columns=columns, show='headings', height=15)
         
         # Spalten konfigurieren
         self.tree.heading('Zeit', text='Zeit')
         self.tree.heading('Charge', text='Charge')
         self.tree.heading('Material', text='Material')
-        self.tree.heading('Kurztext', text='Materialkurztext')
+        self.tree.heading('Typ', text='Typ')
         self.tree.heading('Fach', text='Fach')
-        self.tree.heading('Bemerkung', text='Bemerkung')
         self.tree.heading('Status', text='Status')
         
         # Spaltenbreiten
-        self.tree.column('Zeit', width=120, minwidth=100)
+        self.tree.column('Zeit', width=80, minwidth=70)
         self.tree.column('Charge', width=100, minwidth=80)
         self.tree.column('Material', width=100, minwidth=80)
-        self.tree.column('Kurztext', width=200, minwidth=150)
+        self.tree.column('Typ', width=80, minwidth=70)
         self.tree.column('Fach', width=80, minwidth=60)
-        self.tree.column('Bemerkung', width=150, minwidth=100)
-        self.tree.column('Status', width=100, minwidth=80)
+        self.tree.column('Status', width=120, minwidth=100)
         
         self.tree.grid(row=1, column=0, sticky=(tk.W, tk.E, tk.N, tk.S))
         
@@ -414,6 +579,23 @@ class InventurApp:
         # Fokus immer zurück zum Scan-Feld
         self.root.bind('<FocusIn>', self.ensure_scan_focus)
     
+    def suche_charge(self, charge_nummer):
+        """Sucht Charge in beiden Tabellenblättern und gibt Typ zurück"""
+        # 1. Zuerst in Rollen suchen
+        if self.df_rollen is not None:
+            ergebnis_rolle = self.df_rollen[self.df_rollen['Charge'] == str(charge_nummer)]
+            if not ergebnis_rolle.empty:
+                return ('ROLLE', ergebnis_rolle.iloc[0].to_dict())
+        
+        # 2. Dann in Granulate suchen
+        if self.df_granulate is not None:
+            ergebnis_granulat = self.df_granulate[self.df_granulate['Charge'] == str(charge_nummer)]
+            if not ergebnis_granulat.empty:
+                return ('GRANULAT', ergebnis_granulat.iloc[0].to_dict())
+        
+        # 3. Nicht gefunden
+        return ('NICHT_GEFUNDEN', None)
+    
     def process_scan(self):
         """Verarbeitet einen gescannten Barcode"""
         charge = self.scan_var.get().strip()
@@ -432,110 +614,226 @@ class InventurApp:
         
         self.logger.info(f"Scan verarbeitet: {charge}")
         
-        # Suche in Arbeitstabelle
-        if self.df_arbeitstabelle is not None:
-            try:
-                # Suche nach Charge als String (behält führende Nullen)
-                result = self.df_arbeitstabelle[self.df_arbeitstabelle['Charge'] == charge]
+        # Suche mit neuer Typ-Erkennung
+        try:
+            # Suche nach Charge als String (behält führende Nullen)
+            typ, data = self.suche_charge(charge)
+            
+            # Falls nicht gefunden, versuche auch ohne führende Nullen
+            if typ == 'NICHT_GEFUNDEN':
+                try:
+                    charge_int = str(int(charge))  # Entfernt führende Nullen
+                    typ, data = self.suche_charge(charge_int)
+                    if typ != 'NICHT_GEFUNDEN':
+                        charge = charge_int  # Verwende bereinigte Charge
+                except ValueError:
+                    pass
+            
+            if typ == 'ROLLE':
+                # Rolle gefunden
+                self.show_found_rolle(data, charge)
+            elif typ == 'GRANULAT':
+                # Granulat gefunden
+                self.show_found_granulat(data, charge)
+            else:
+                # Ware nicht gefunden
+                self.show_not_found_dialog(charge)
                 
-                # Falls nicht gefunden, versuche auch ohne führende Nullen
-                if result.empty:
-                    try:
-                        charge_int = str(int(charge))  # Entfernt führende Nullen
-                        result = self.df_arbeitstabelle[self.df_arbeitstabelle['Charge'] == charge_int]
-                    except ValueError:
-                        pass
-                
-                if not result.empty:
-                    # Ware gefunden
-                    self.show_found_item(result.iloc[0], charge)
-                else:
-                    # Ware nicht gefunden
-                    self.show_not_found_dialog(charge)
-                    
-            except Exception as e:
-                messagebox.showerror("Fehler", f"Fehler bei der Suche: {e}")
-                self.logger.error(f"Fehler bei Suche: {e}")
-                self.reset_scan()
-        else:
-            messagebox.showerror("Fehler", "Keine Arbeitstabelle geladen")
+        except Exception as e:
+            messagebox.showerror("Fehler", f"Fehler bei der Suche: {e}")
+            self.logger.error(f"Fehler bei Suche: {e}")
+            self.reset_scan()
     
     def is_already_scanned(self, charge):
         """Prüft ob eine Charge bereits gescannt wurde"""
-        # Prüfe in beiden Listen
-        for item in self.inventur_data:
-            if str(item.get('charge', '')) == str(charge):
-                return True
+        # Prüfe in allen Listen
+        all_lists = [
+            self.inventur_rollen_data,
+            self.inventur_granulat_data,
+            self.nicht_gefunden_rollen_data,
+            self.nicht_gefunden_granulat_data
+        ]
         
-        for item in self.nicht_gefunden_data:
-            if str(item.get('charge', '')) == str(charge):
-                return True
+        for item_list in all_lists:
+            for item in item_list:
+                if str(item.get('charge', '')) == str(charge):
+                    return True
         
         return False
     
-    def show_found_item(self, item, charge):
-        """Zeigt gefundene Ware an"""
+    def show_found_rolle(self, item, charge):
+        """Zeigt gefundene Rolle an (BLAU)"""
+        self.current_type = 'ROLLE'
         self.current_scan = {
             'charge': charge,
             'material': str(item.get('Material', '')),
             'kurztext': str(item.get('Materialkurztext', '')),
             'laenge': float(item.get('Länge m', 0)),
-            'breite': int(item.get('Breite mm', 0)),
+            'breite_original': int(item.get('Breite mm', 0)),  # Original aus Arbeitstabelle
             'flaeche': float(item.get('Frei verwendbar', 0)),
-            'status': 'gefunden'
+            'fach_original': str(item.get('Fach', '') if pd.notna(item.get('Fach')) else ''),  # Original aus Arbeitstabelle
+            'status': 'gefunden',
+            'typ': 'ROLLE'
         }
         
-        # Aktualisiere Labels
+        # Ändere Hintergrundfarbe zu BLAU
+        self.current_frame.config(text="🔵 ROLLE GESCANNT")
+        
+        # Aktualisiere Labels (OHNE Breite mm Anzeige!)
         self.charge_label.config(text=charge)
         self.material_label.config(text=self.current_scan['material'])
         self.kurztext_label.config(text=self.current_scan['kurztext'])
         self.laenge_label.config(text=f"{self.current_scan['laenge']:.2f} m")
-        self.breite_label.config(text=f"{self.current_scan['breite']} mm")
+        self.breite_label.config(text="")  # NICHT anzeigen!
         self.flaeche_label.config(text=f"{self.current_scan['flaeche']:.2f} m²")
         
-        # Zeige Current-Scan-Frame
+        # Zeige Current-Scan-Frame mit blauem Hintergrund
         self.current_frame.grid()
         
-        # Fokus auf Fach-Eingabe
-        self.fach_entry.focus_set()
+        # Erstelle Rollen-Eingabefelder
+        self.create_rolle_inputs()
         
         # Status aktualisieren
-        self.status_var.set(f"Ware gefunden: {self.current_scan['kurztext']}")
+        self.status_var.set(f"🔵 Rolle gefunden: {self.current_scan['kurztext']}")
+        
+        # Scan-Feld leeren
+        self.scan_var.set("")
+    
+    def show_found_granulat(self, item, charge):
+        """Zeigt gefundenes Granulat an (GELB)"""
+        self.current_type = 'GRANULAT'
+        self.current_scan = {
+            'charge': charge,
+            'material': str(item.get('Material', '')),
+            'kurztext': str(item.get('Materialkurztext', '')),
+            'frei_verwendbar_kg': float(item.get('Frei verwendbar', 0)),  # Soll-Gewicht
+            'status': 'gefunden',
+            'typ': 'GRANULAT'
+        }
+        
+        # Ändere Hintergrundfarbe zu GELB
+        self.current_frame.config(text="🟨 GRANULAT GESCANNT")
+        
+        # Aktualisiere Labels (nur relevante für Granulat)
+        self.charge_label.config(text=charge)
+        self.material_label.config(text=self.current_scan['material'])
+        self.kurztext_label.config(text=self.current_scan['kurztext'])
+        self.laenge_label.config(text="")  # Nicht relevant für Granulat
+        self.breite_label.config(text="")  # Nicht relevant für Granulat
+        self.flaeche_label.config(text=f"{self.current_scan['frei_verwendbar_kg']:.2f} KG")
+        
+        # Zeige Current-Scan-Frame mit gelbem Hintergrund
+        self.current_frame.grid()
+        
+        # Erstelle Granulat-Eingabefelder
+        self.create_granulat_inputs()
+        
+        # Status aktualisieren
+        self.status_var.set(f"🟨 Granulat gefunden: {self.current_scan['kurztext']}")
         
         # Scan-Feld leeren
         self.scan_var.set("")
     
     def show_not_found_dialog(self, charge):
-        """Zeigt Dialog für nicht gefundene Ware"""
+        """Zeigt Dialog für nicht gefundene Ware (V2 mit Typ-Auswahl)"""
         dialog = NotFoundDialog(self.root, charge)
-        result = dialog.result
         
-        if result:
-            # Manuelle Eingabe wurde gespeichert
-            self.current_scan = result
-            self.current_scan['status'] = 'nicht_gefunden'
+        if dialog.result:
+            # Setze aktuellen Scan mit manuellen Daten
+            self.current_scan = dialog.result.copy()
+            self.current_type = dialog.result['typ']
             
-            # Speichere direkt (ohne Fach-Eingabe)
-            self.save_scan_to_data()
+            # Füge Zeitstempel hinzu
+            self.current_scan['zeitstempel'] = datetime.now().strftime('%d.%m.%Y %H:%M:%S')
+            
+            # Speichere in entsprechende Liste basierend auf Typ
+            if self.current_type == 'ROLLE':
+                self.nicht_gefunden_rollen_data.append(self.current_scan.copy())
+                typ_icon = "🔵"
+            elif self.current_type == 'GRANULAT':
+                self.nicht_gefunden_granulat_data.append(self.current_scan.copy())
+                typ_icon = "🟨"
+            
+            # Zur Undo-Liste hinzufügen
+            self.undo_stack.append(('add', self.current_scan.copy(), self.current_type))
+            if len(self.undo_stack) > 50:
+                self.undo_stack.pop(0)
+            
+            # In Excel speichern (Auto-Save)
+            if self.config.get('auto_save', True):
+                self.save_to_excel()
+            
+            # Liste aktualisieren
+            self.update_list()
+            
+            # Status aktualisieren
+            total_rollen = len(self.inventur_rollen_data) + len(self.nicht_gefunden_rollen_data)
+            total_granulat = len(self.inventur_granulat_data) + len(self.nicht_gefunden_granulat_data)
+            total_scans = total_rollen + total_granulat
+            
+            self.status_var.set(f"{typ_icon} Nicht gefundene Ware gespeichert. Gesamt: {total_scans} ({total_rollen} Rollen, {total_granulat} Granulate)")
+            self.logger.info(f"{self.current_type} nicht gefunden gespeichert: {self.current_scan['charge']}")
+            
+            # Reset für nächsten Scan
             self.reset_scan()
         else:
             # Abgebrochen
             self.reset_scan()
     
     def save_current_scan(self, event=None):
-        """Speichert den aktuellen Scan"""
-        if not self.current_scan:
+        """Speichert den aktuellen Scan (Rolle oder Granulat)"""
+        if not self.current_scan or not self.current_type:
             return
         
-        fach = self.fach_var.get().strip()
-        if not fach:
-            messagebox.showwarning("Warnung", "Bitte Fach-Nummer eingeben")
-            self.fach_entry.focus_set()
-            return
-        
-        # Füge Fach und Bemerkung hinzu
-        self.current_scan['fach'] = fach
-        self.current_scan['bemerkung'] = self.bemerkung_var.get().strip()
+        if self.current_type == 'ROLLE':
+            # Validierung für Rollen
+            fach = self.fach_var.get().strip()
+            if not fach:
+                messagebox.showwarning("Warnung", "⚠️ Fach (Lagerort) ist ein Pflichtfeld für Rollen!")
+                if 'fach_entry' in self.input_widgets:
+                    self.input_widgets['fach_entry'].focus_set()
+                return
+            
+            breite_text = self.breite_kontrolliert_var.get().strip()
+            if not breite_text:
+                messagebox.showwarning("Warnung", "⚠️ Breite kontrolliert ist ein Pflichtfeld!")
+                if 'breite_entry' in self.input_widgets:
+                    self.input_widgets['breite_entry'].focus_set()
+                return
+            
+            # Validiere Breite
+            valid, result = self.validiere_breite(breite_text)
+            if not valid:
+                messagebox.showerror("Fehler", f"⚠️ {result}")
+                if 'breite_entry' in self.input_widgets:
+                    self.input_widgets['breite_entry'].focus_set()
+                return
+            
+            # Füge Rollen-spezifische Daten hinzu
+            self.current_scan['fach_kontrolliert'] = fach
+            self.current_scan['breite_kontrolliert'] = result
+            self.current_scan['bemerkung'] = self.bemerkung_var.get().strip()
+            
+        elif self.current_type == 'GRANULAT':
+            # Validierung für Granulat
+            zahlmenge_text = self.zahlmenge_var.get().strip()
+            if not zahlmenge_text:
+                messagebox.showwarning("Warnung", "⚠️ Zählmenge ist ein Pflichtfeld!")
+                if 'zahlmenge_entry' in self.input_widgets:
+                    self.input_widgets['zahlmenge_entry'].focus_set()
+                return
+            
+            # Validiere Gewicht
+            valid, result = self.validiere_gewicht(zahlmenge_text)
+            if not valid:
+                messagebox.showerror("Fehler", f"⚠️ {result}")
+                if 'zahlmenge_entry' in self.input_widgets:
+                    self.input_widgets['zahlmenge_entry'].focus_set()
+                return
+            
+            # Füge Granulat-spezifische Daten hinzu
+            self.current_scan['zahlmenge_kg'] = result
+            self.current_scan['bemerkung'] = self.bemerkung_var.get().strip()
         
         # Speichere in Datenstrukturen
         self.save_scan_to_data()
@@ -545,20 +843,26 @@ class InventurApp:
     
     def save_scan_to_data(self):
         """Speichert Scan in Datenstrukturen und Excel"""
-        if not self.current_scan:
+        if not self.current_scan or not self.current_type:
             return
         
         # Zeitstempel hinzufügen
         self.current_scan['zeitstempel'] = datetime.now().strftime('%d.%m.%Y %H:%M:%S')
         
-        # Zu entsprechender Liste hinzufügen
-        if self.current_scan['status'] == 'gefunden':
-            self.inventur_data.append(self.current_scan.copy())
-        else:
-            self.nicht_gefunden_data.append(self.current_scan.copy())
+        # Zu entsprechender Liste hinzufügen basierend auf Typ und Status
+        if self.current_type == 'ROLLE':
+            if self.current_scan['status'] == 'gefunden':
+                self.inventur_rollen_data.append(self.current_scan.copy())
+            else:
+                self.nicht_gefunden_rollen_data.append(self.current_scan.copy())
+        elif self.current_type == 'GRANULAT':
+            if self.current_scan['status'] == 'gefunden':
+                self.inventur_granulat_data.append(self.current_scan.copy())
+            else:
+                self.nicht_gefunden_granulat_data.append(self.current_scan.copy())
         
         # Zur Undo-Liste hinzufügen
-        self.undo_stack.append(('add', self.current_scan.copy()))
+        self.undo_stack.append(('add', self.current_scan.copy(), self.current_type))
         if len(self.undo_stack) > 50:  # Begrenze Undo-Stack
             self.undo_stack.pop(0)
         
@@ -570,17 +874,27 @@ class InventurApp:
         self.update_list()
         
         # Status aktualisieren
-        total_scans = len(self.inventur_data) + len(self.nicht_gefunden_data)
-        self.status_var.set(f"Artikel gespeichert. Gesamt: {total_scans}")
+        total_rollen = len(self.inventur_rollen_data) + len(self.nicht_gefunden_rollen_data)
+        total_granulat = len(self.inventur_granulat_data) + len(self.nicht_gefunden_granulat_data)
+        total_scans = total_rollen + total_granulat
         
-        self.logger.info(f"Artikel gespeichert: {self.current_scan['charge']}")
+        typ_icon = "🔵" if self.current_type == 'ROLLE' else "🟨"
+        self.status_var.set(f"{typ_icon} Artikel gespeichert. Gesamt: {total_scans} ({total_rollen} Rollen, {total_granulat} Granulate)")
+        
+        self.logger.info(f"{self.current_type} gespeichert: {self.current_scan['charge']}")
     
     def reset_scan(self):
         """Setzt den aktuellen Scan zurück"""
         self.current_scan = None
+        self.current_type = None
         self.scan_var.set("")
         self.fach_var.set("")
         self.bemerkung_var.set("")
+        self.breite_kontrolliert_var.set("")
+        self.zahlmenge_var.set("")
+        
+        # Lösche dynamische Eingabefelder
+        self.clear_input_widgets()
         
         # Verstecke Current-Scan-Frame
         self.current_frame.grid_remove()
@@ -603,158 +917,282 @@ class InventurApp:
             pass  # Wird durch save_current_scan() erledigt
     
     def update_list(self):
-        """Aktualisiert die Artikelliste"""
+        """Aktualisiert die Artikelliste mit neuer Struktur"""
         # Lösche alle Einträge
         for item in self.tree.get_children():
             self.tree.delete(item)
         
-        # Kombiniere beide Listen
+        # Kombiniere alle Listen mit Typ-Information
         all_items = []
-        for item in self.inventur_data:
-            all_items.append((item, 'Gefunden'))
-        for item in self.nicht_gefunden_data:
-            all_items.append((item, 'Nicht gefunden'))
+        
+        # Rollen - gefunden
+        for item in self.inventur_rollen_data:
+            all_items.append((item, 'Gefunden', 'ROLLE'))
+        
+        # Rollen - nicht gefunden
+        for item in self.nicht_gefunden_rollen_data:
+            all_items.append((item, 'Nicht gefunden', 'ROLLE'))
+        
+        # Granulat - gefunden
+        for item in self.inventur_granulat_data:
+            all_items.append((item, 'Gefunden', 'GRANULAT'))
+        
+        # Granulat - nicht gefunden
+        for item in self.nicht_gefunden_granulat_data:
+            all_items.append((item, 'Nicht gefunden', 'GRANULAT'))
         
         # Sortiere nach Zeitstempel (neueste zuerst)
         all_items.sort(key=lambda x: x[0]['zeitstempel'], reverse=True)
         
         # Füge zur TreeView hinzu
-        for item_data, status in all_items:
-            # Kürze Kurztext falls zu lang
-            kurztext = item_data['kurztext']
-            if len(kurztext) > 30:
-                kurztext = kurztext[:27] + "..."
+        for item_data, status, typ in all_items:
+            # Typ-Icon
+            typ_icon = "🔵 Rolle" if typ == 'ROLLE' else "🟨 Granu"
             
-            # Bereinige Bemerkung von "nan" Werten
-            bemerkung = item_data.get('bemerkung', '')
-            if bemerkung == 'nan' or str(bemerkung).lower() == 'nan':
-                bemerkung = ''
+            # Fach-Information (unterschiedlich je nach Typ)
+            if typ == 'ROLLE':
+                fach_info = item_data.get('fach_kontrolliert', item_data.get('fach', ''))
+            else:
+                fach_info = '-'  # Granulat hat kein Fach
             
             values = (
                 item_data['zeitstempel'].split()[1],  # Nur Zeit anzeigen
                 item_data['charge'],
                 item_data['material'],
-                kurztext,
-                item_data.get('fach', ''),
-                bemerkung,
+                typ_icon,
+                fach_info,
                 status
             )
             
             item_id = self.tree.insert('', 'end', values=values)
             
-            # Farbcodierung
+            # Status-Icon setzen
             if status == 'Nicht gefunden':
                 self.tree.set(item_id, 'Status', '⚠️ Nicht gefunden')
             else:
                 self.tree.set(item_id, 'Status', '✅ Gefunden')
         
         # Anzahl aktualisieren
-        total = len(all_items)
-        self.count_label.config(text=f"{total} Artikel")
+        total_rollen = len(self.inventur_rollen_data) + len(self.nicht_gefunden_rollen_data)
+        total_granulat = len(self.inventur_granulat_data) + len(self.nicht_gefunden_granulat_data)
+        total = total_rollen + total_granulat
+        
+        self.count_label.config(text=f"{total} Artikel (🔵 {total_rollen} Rollen, 🟨 {total_granulat} Granulate)")
     
     def save_to_excel(self):
-        """Speichert Daten in Excel-Datei"""
+        """Speichert Daten in separate Excel-Dateien für Rollen und Granulat"""
         try:
-            # Erstelle oder lade Workbook
-            if self.inventur_path.exists():
-                wb = load_workbook(self.inventur_path)
-            else:
-                wb = Workbook()
-                # Entferne Standard-Sheet
-                if 'Sheet' in wb.sheetnames:
-                    wb.remove(wb['Sheet'])
+            # Speichere Rollen-Datei
+            self.save_rollen_excel()
             
-            # Erstelle/aktualisiere Inventur-Sheet
-            if 'Inventur' in wb.sheetnames:
-                wb.remove(wb['Inventur'])
+            # Speichere Granulat-Datei
+            self.save_granulat_excel()
             
-            ws_inventur = wb.create_sheet('Inventur')
-            
-            # Header für Inventur
-            headers = ['Datum/Uhrzeit', 'Charge', 'Material', 'Materialkurztext', 
-                      'Länge m', 'Breite mm', 'Fläche m²', 'Fach', 'Bemerkung']
-            ws_inventur.append(headers)
-            
-            # Daten für Inventur
-            for item in self.inventur_data:
-                # Bereinige Bemerkung beim Speichern
-                bemerkung = item.get('bemerkung', '')
-                if bemerkung == 'nan' or str(bemerkung).lower() == 'nan':
-                    bemerkung = ''
-                
-                row = [
-                    item['zeitstempel'],
-                    item['charge'],  # Ohne Apostroph - wird über Formatierung als Text gesetzt
-                    item['material'],
-                    item['kurztext'],
-                    item['laenge'],
-                    item['breite'],
-                    item['flaeche'],
-                    item.get('fach', ''),
-                    bemerkung
-                ]
-                ws_inventur.append(row)
-            
-            # Formatiere Charge-Spalte als Text
-            from openpyxl.styles import NamedStyle
-            from openpyxl.utils import get_column_letter
-            
-            # Charge-Spalte (Spalte B) als Text formatieren
-            charge_col = get_column_letter(2)  # Spalte B
-            for row in range(2, len(self.inventur_data) + 2):  # Ab Zeile 2 (nach Header)
-                cell = ws_inventur[f'{charge_col}{row}']
-                cell.number_format = '@'  # Text-Format
-            
-            # Erstelle/aktualisiere Nicht_gefunden-Sheet
-            if 'Nicht_gefunden' in wb.sheetnames:
-                wb.remove(wb['Nicht_gefunden'])
-            
-            ws_nicht_gefunden = wb.create_sheet('Nicht_gefunden')
-            ws_nicht_gefunden.append(headers)
-            
-            # Daten für Nicht_gefunden
-            for item in self.nicht_gefunden_data:
-                # Bereinige Bemerkung beim Speichern
-                bemerkung = item.get('bemerkung', '')
-                if bemerkung == 'nan' or str(bemerkung).lower() == 'nan':
-                    bemerkung = ''
-                
-                row = [
-                    item['zeitstempel'],
-                    item['charge'],  # Ohne Apostroph - wird über Formatierung als Text gesetzt
-                    item['material'],
-                    item['kurztext'],
-                    item['laenge'],
-                    item['breite'],
-                    item['flaeche'],
-                    item.get('fach', ''),
-                    bemerkung
-                ]
-                ws_nicht_gefunden.append(row)
-            
-            # Formatiere Charge-Spalte als Text auch im Nicht_gefunden-Sheet
-            for row in range(2, len(self.nicht_gefunden_data) + 2):  # Ab Zeile 2 (nach Header)
-                cell = ws_nicht_gefunden[f'{charge_col}{row}']
-                cell.number_format = '@'  # Text-Format
-            
-            # Speichern
-            wb.save(self.inventur_path)
-            self.logger.info("Excel-Datei gespeichert")
+            self.logger.info("Excel-Dateien gespeichert")
             
         except Exception as e:
-            messagebox.showerror("Fehler", f"Fehler beim Speichern der Excel-Datei:\n{e}")
+            messagebox.showerror("Fehler", f"Fehler beim Speichern der Excel-Dateien:\n{e}")
             self.logger.error(f"Fehler beim Speichern: {e}")
     
-    def load_existing_inventur(self):
-        """Lädt bestehende Inventur-Daten"""
-        if not self.inventur_path.exists():
-            return
+    def save_rollen_excel(self):
+        """Speichert Rollen-Daten in Inventur_Rollen.xlsx"""
+        # Erstelle oder lade Workbook
+        if self.inventur_rollen_path.exists():
+            wb = load_workbook(self.inventur_rollen_path)
+        else:
+            wb = Workbook()
+            # Entferne Standard-Sheet
+            if 'Sheet' in wb.sheetnames:
+                wb.remove(wb['Sheet'])
         
+        # Erstelle/aktualisiere Inventur-Sheet
+        if 'Inventur' in wb.sheetnames:
+            wb.remove(wb['Inventur'])
+        
+        ws_inventur = wb.create_sheet('Inventur')
+        
+        # Header für Rollen-Inventur (erweiterte Struktur)
+        headers = ['Datum/Uhrzeit', 'Charge', 'Material', 'Materialkurztext', 
+                  'Länge m', 'Fläche m²', 'Breite mm', 'Breite kontrolliert', 
+                  'Fach', 'Fach kontrolliert', 'Bemerkung']
+        ws_inventur.append(headers)
+        
+        # Daten für Rollen-Inventur
+        for item in self.inventur_rollen_data:
+            bemerkung = item.get('bemerkung', '')
+            if bemerkung == 'nan' or str(bemerkung).lower() == 'nan':
+                bemerkung = ''
+            
+            row = [
+                item['zeitstempel'],
+                item['charge'],
+                item['material'],
+                item['kurztext'],
+                item['laenge'],
+                item['flaeche'],
+                item.get('breite_original', ''),  # Original aus Arbeitstabelle
+                item.get('breite_kontrolliert', ''),  # Vom Nutzer eingegeben
+                item.get('fach_original', ''),  # Original aus Arbeitstabelle
+                item.get('fach_kontrolliert', ''),  # Vom Nutzer eingegeben
+                bemerkung
+            ]
+            ws_inventur.append(row)
+        
+        # Erstelle/aktualisiere Nicht_gefunden-Sheet
+        if 'Nicht_gefunden' in wb.sheetnames:
+            wb.remove(wb['Nicht_gefunden'])
+        
+        ws_nicht_gefunden = wb.create_sheet('Nicht_gefunden')
+        ws_nicht_gefunden.append(headers)
+        
+        # Daten für Nicht_gefunden Rollen
+        for item in self.nicht_gefunden_rollen_data:
+            bemerkung = item.get('bemerkung', '')
+            if bemerkung == 'nan' or str(bemerkung).lower() == 'nan':
+                bemerkung = ''
+            
+            row = [
+                item['zeitstempel'],
+                item['charge'],
+                item['material'],
+                item['kurztext'],
+                item.get('laenge', ''),
+                item.get('flaeche', ''),
+                item.get('breite_original', ''),
+                item.get('breite_kontrolliert', ''),
+                item.get('fach_original', ''),
+                item.get('fach_kontrolliert', ''),
+                bemerkung
+            ]
+            ws_nicht_gefunden.append(row)
+        
+        # Formatiere Charge-Spalte als Text
+        from openpyxl.utils import get_column_letter
+        charge_col = get_column_letter(2)  # Spalte B
+        
+        # Inventur-Sheet
+        for row in range(2, len(self.inventur_rollen_data) + 2):
+            cell = ws_inventur[f'{charge_col}{row}']
+            cell.number_format = '@'
+        
+        # Nicht_gefunden-Sheet
+        for row in range(2, len(self.nicht_gefunden_rollen_data) + 2):
+            cell = ws_nicht_gefunden[f'{charge_col}{row}']
+            cell.number_format = '@'
+        
+        # Speichern
+        wb.save(self.inventur_rollen_path)
+    
+    def save_granulat_excel(self):
+        """Speichert Granulat-Daten in Inventur_Granulat.xlsx"""
+        # Erstelle oder lade Workbook
+        if self.inventur_granulat_path.exists():
+            wb = load_workbook(self.inventur_granulat_path)
+        else:
+            wb = Workbook()
+            # Entferne Standard-Sheet
+            if 'Sheet' in wb.sheetnames:
+                wb.remove(wb['Sheet'])
+        
+        # Erstelle/aktualisiere Inventur-Sheet
+        if 'Inventur' in wb.sheetnames:
+            wb.remove(wb['Inventur'])
+        
+        ws_inventur = wb.create_sheet('Inventur')
+        
+        # Header für Granulat-Inventur
+        headers = ['Datum/Uhrzeit', 'Charge', 'Material', 'Materialkurztext', 
+                  'Frei verwendbar (KG)', 'Zählmenge (KG)', 'Bemerkung']
+        ws_inventur.append(headers)
+        
+        # Daten für Granulat-Inventur
+        for item in self.inventur_granulat_data:
+            bemerkung = item.get('bemerkung', '')
+            if bemerkung == 'nan' or str(bemerkung).lower() == 'nan':
+                bemerkung = ''
+            
+            row = [
+                item['zeitstempel'],
+                item['charge'],
+                item['material'],
+                item['kurztext'],
+                item.get('frei_verwendbar_kg', ''),  # Soll-Gewicht
+                item.get('zahlmenge_kg', ''),  # Ist-Gewicht
+                bemerkung
+            ]
+            ws_inventur.append(row)
+        
+        # Erstelle/aktualisiere Nicht_gefunden-Sheet
+        if 'Nicht_gefunden' in wb.sheetnames:
+            wb.remove(wb['Nicht_gefunden'])
+        
+        ws_nicht_gefunden = wb.create_sheet('Nicht_gefunden')
+        ws_nicht_gefunden.append(headers)
+        
+        # Daten für Nicht_gefunden Granulat
+        for item in self.nicht_gefunden_granulat_data:
+            bemerkung = item.get('bemerkung', '')
+            if bemerkung == 'nan' or str(bemerkung).lower() == 'nan':
+                bemerkung = ''
+            
+            row = [
+                item['zeitstempel'],
+                item['charge'],
+                item['material'],
+                item['kurztext'],
+                item.get('frei_verwendbar_kg', ''),
+                item.get('zahlmenge_kg', ''),
+                bemerkung
+            ]
+            ws_nicht_gefunden.append(row)
+        
+        # Formatiere Charge-Spalte als Text
+        from openpyxl.utils import get_column_letter
+        charge_col = get_column_letter(2)  # Spalte B
+        
+        # Inventur-Sheet
+        for row in range(2, len(self.inventur_granulat_data) + 2):
+            cell = ws_inventur[f'{charge_col}{row}']
+            cell.number_format = '@'
+        
+        # Nicht_gefunden-Sheet
+        for row in range(2, len(self.nicht_gefunden_granulat_data) + 2):
+            cell = ws_nicht_gefunden[f'{charge_col}{row}']
+            cell.number_format = '@'
+        
+        # Speichern
+        wb.save(self.inventur_granulat_path)
+    
+    def load_existing_inventur(self):
+        """Lädt bestehende Inventur-Daten aus beiden V2-Dateien"""
+        total_loaded = 0
+        
+        # Lade Rollen-Inventur
+        total_loaded += self.load_existing_rollen()
+        
+        # Lade Granulat-Inventur
+        total_loaded += self.load_existing_granulat()
+        
+        if total_loaded > 0:
+            # Liste aktualisieren
+            self.update_list()
+            
+            total_rollen = len(self.inventur_rollen_data) + len(self.nicht_gefunden_rollen_data)
+            total_granulat = len(self.inventur_granulat_data) + len(self.nicht_gefunden_granulat_data)
+            
+            self.status_var.set(f"Bestehende Inventur geladen: {total_rollen} Rollen, {total_granulat} Granulate")
+            self.logger.info(f"Bestehende Inventur geladen: {total_rollen} Rollen, {total_granulat} Granulate")
+    
+    def load_existing_rollen(self):
+        """Lädt bestehende Rollen-Inventur"""
+        if not self.inventur_rollen_path.exists():
+            return 0
+        
+        loaded_count = 0
         try:
-            # Lade Inventur-Sheet mit Charge als String
-            df_inventur = pd.read_excel(self.inventur_path, sheet_name='Inventur', dtype={'Charge': str})
+            # Lade Rollen Inventur-Sheet
+            df_inventur = pd.read_excel(self.inventur_rollen_path, sheet_name='Inventur', dtype={'Charge': str})
             for _, row in df_inventur.iterrows():
-                # Bereinige Bemerkung von nan-Werten
                 bemerkung = row.get('Bemerkung', '')
                 if pd.isna(bemerkung) or str(bemerkung).lower() == 'nan':
                     bemerkung = ''
@@ -765,19 +1203,22 @@ class InventurApp:
                     'material': str(row.get('Material', '')),
                     'kurztext': str(row.get('Materialkurztext', '')),
                     'laenge': float(row.get('Länge m', 0)),
-                    'breite': int(row.get('Breite mm', 0)),
                     'flaeche': float(row.get('Fläche m²', 0)),
-                    'fach': str(row.get('Fach', '')),
+                    'breite_original': int(row.get('Breite mm', 0)),
+                    'breite_kontrolliert': int(row.get('Breite kontrolliert', 0)),
+                    'fach_original': str(row.get('Fach', '')),
+                    'fach_kontrolliert': str(row.get('Fach kontrolliert', '')),
                     'bemerkung': str(bemerkung),
-                    'status': 'gefunden'
+                    'status': 'gefunden',
+                    'typ': 'ROLLE'
                 }
-                self.inventur_data.append(item)
+                self.inventur_rollen_data.append(item)
+                loaded_count += 1
             
-            # Lade Nicht_gefunden-Sheet mit Charge als String
+            # Lade Rollen Nicht_gefunden-Sheet
             try:
-                df_nicht_gefunden = pd.read_excel(self.inventur_path, sheet_name='Nicht_gefunden', dtype={'Charge': str})
+                df_nicht_gefunden = pd.read_excel(self.inventur_rollen_path, sheet_name='Nicht_gefunden', dtype={'Charge': str})
                 for _, row in df_nicht_gefunden.iterrows():
-                    # Bereinige Bemerkung von nan-Werten
                     bemerkung = row.get('Bemerkung', '')
                     if pd.isna(bemerkung) or str(bemerkung).lower() == 'nan':
                         bemerkung = ''
@@ -788,52 +1229,132 @@ class InventurApp:
                         'material': str(row.get('Material', '')),
                         'kurztext': str(row.get('Materialkurztext', '')),
                         'laenge': float(row.get('Länge m', 0)),
-                        'breite': int(row.get('Breite mm', 0)),
                         'flaeche': float(row.get('Fläche m²', 0)),
-                        'fach': str(row.get('Fach', '')),
+                        'breite_original': int(row.get('Breite mm', 0)),
+                        'breite_kontrolliert': int(row.get('Breite kontrolliert', 0)),
+                        'fach_original': str(row.get('Fach', '')),
+                        'fach_kontrolliert': str(row.get('Fach kontrolliert', '')),
                         'bemerkung': str(bemerkung),
-                        'status': 'nicht_gefunden'
+                        'status': 'nicht_gefunden',
+                        'typ': 'ROLLE'
                     }
-                    self.nicht_gefunden_data.append(item)
+                    self.nicht_gefunden_rollen_data.append(item)
+                    loaded_count += 1
             except:
                 pass  # Sheet existiert noch nicht
-            
-            # Liste aktualisieren
-            self.update_list()
-            
-            total = len(self.inventur_data) + len(self.nicht_gefunden_data)
-            self.status_var.set(f"Bestehende Inventur geladen: {total} Artikel")
-            self.logger.info(f"Bestehende Inventur geladen: {total} Artikel")
-            
+                
         except Exception as e:
-            self.logger.error(f"Fehler beim Laden der bestehenden Inventur: {e}")
+            self.logger.error(f"Fehler beim Laden der Rollen-Inventur: {e}")
+        
+        return loaded_count
+    
+    def load_existing_granulat(self):
+        """Lädt bestehende Granulat-Inventur"""
+        if not self.inventur_granulat_path.exists():
+            return 0
+        
+        loaded_count = 0
+        try:
+            # Lade Granulat Inventur-Sheet
+            df_inventur = pd.read_excel(self.inventur_granulat_path, sheet_name='Inventur', dtype={'Charge': str})
+            for _, row in df_inventur.iterrows():
+                bemerkung = row.get('Bemerkung', '')
+                if pd.isna(bemerkung) or str(bemerkung).lower() == 'nan':
+                    bemerkung = ''
+                
+                item = {
+                    'zeitstempel': str(row.get('Datum/Uhrzeit', '')),
+                    'charge': str(row.get('Charge', '')),
+                    'material': str(row.get('Material', '')),
+                    'kurztext': str(row.get('Materialkurztext', '')),
+                    'frei_verwendbar_kg': float(row.get('Frei verwendbar (KG)', 0)),
+                    'zahlmenge_kg': float(row.get('Zählmenge (KG)', 0)),
+                    'bemerkung': str(bemerkung),
+                    'status': 'gefunden',
+                    'typ': 'GRANULAT'
+                }
+                self.inventur_granulat_data.append(item)
+                loaded_count += 1
+            
+            # Lade Granulat Nicht_gefunden-Sheet
+            try:
+                df_nicht_gefunden = pd.read_excel(self.inventur_granulat_path, sheet_name='Nicht_gefunden', dtype={'Charge': str})
+                for _, row in df_nicht_gefunden.iterrows():
+                    bemerkung = row.get('Bemerkung', '')
+                    if pd.isna(bemerkung) or str(bemerkung).lower() == 'nan':
+                        bemerkung = ''
+                    
+                    item = {
+                        'zeitstempel': str(row.get('Datum/Uhrzeit', '')),
+                        'charge': str(row.get('Charge', '')),
+                        'material': str(row.get('Material', '')),
+                        'kurztext': str(row.get('Materialkurztext', '')),
+                        'frei_verwendbar_kg': float(row.get('Frei verwendbar (KG)', 0)),
+                        'zahlmenge_kg': float(row.get('Zählmenge (KG)', 0)),
+                        'bemerkung': str(bemerkung),
+                        'status': 'nicht_gefunden',
+                        'typ': 'GRANULAT'
+                    }
+                    self.nicht_gefunden_granulat_data.append(item)
+                    loaded_count += 1
+            except:
+                pass  # Sheet existiert noch nicht
+                
+        except Exception as e:
+            self.logger.error(f"Fehler beim Laden der Granulat-Inventur: {e}")
+        
+        return loaded_count
     
     def export_inventur(self):
-        """Exportiert Inventur als Backup"""
+        """Exportiert beide Inventur-Dateien als Backup (V2)"""
         try:
             timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-            backup_filename = f"Inventur_Backup_{timestamp}.xlsx"
             
-            backup_path = filedialog.asksaveasfilename(
-                defaultextension=".xlsx",
-                filetypes=[("Excel files", "*.xlsx")],
-                initialfile=backup_filename,
-                title="Inventur-Backup speichern"
-            )
+            # Erstelle Backup-Verzeichnis falls nicht vorhanden
+            backup_dir = self.data_dir / 'backups'
+            backup_dir.mkdir(exist_ok=True)
             
-            if backup_path:
-                # Kopiere aktuelle Inventur-Datei
-                if self.inventur_path.exists():
-                    import shutil
-                    shutil.copy2(self.inventur_path, backup_path)
-                else:
-                    # Erstelle neue Datei
-                    self.save_to_excel()
-                    shutil.copy2(self.inventur_path, backup_path)
+            # Backup-Dateinamen
+            rollen_backup = backup_dir / f"Inventur_Rollen_Backup_{timestamp}.xlsx"
+            granulat_backup = backup_dir / f"Inventur_Granulat_Backup_{timestamp}.xlsx"
+            
+            import shutil
+            backup_count = 0
+            
+            # Kopiere Rollen-Datei falls vorhanden
+            if self.inventur_rollen_path.exists():
+                shutil.copy2(self.inventur_rollen_path, rollen_backup)
+                backup_count += 1
+            else:
+                # Erstelle neue Rollen-Datei
+                self.save_rollen_excel()
+                if self.inventur_rollen_path.exists():
+                    shutil.copy2(self.inventur_rollen_path, rollen_backup)
+                    backup_count += 1
+            
+            # Kopiere Granulat-Datei falls vorhanden
+            if self.inventur_granulat_path.exists():
+                shutil.copy2(self.inventur_granulat_path, granulat_backup)
+                backup_count += 1
+            else:
+                # Erstelle neue Granulat-Datei
+                self.save_granulat_excel()
+                if self.inventur_granulat_path.exists():
+                    shutil.copy2(self.inventur_granulat_path, granulat_backup)
+                    backup_count += 1
+            
+            if backup_count > 0:
+                backup_message = f"Backup erfolgreich erstellt:\n\n"
+                if rollen_backup.exists():
+                    backup_message += f"🔵 Rollen: {rollen_backup.name}\n"
+                if granulat_backup.exists():
+                    backup_message += f"🟨 Granulat: {granulat_backup.name}\n"
+                backup_message += f"\nSpeicherort: {backup_dir}"
                 
-                messagebox.showinfo("Export erfolgreich", 
-                    f"Inventur-Backup gespeichert:\n{backup_path}")
-                self.logger.info(f"Backup erstellt: {backup_path}")
+                messagebox.showinfo("Export erfolgreich", backup_message)
+                self.logger.info(f"V2 Backup erstellt: {backup_count} Dateien")
+            else:
+                messagebox.showwarning("Warnung", "Keine Inventur-Daten zum Exportieren gefunden.")
                 
         except Exception as e:
             messagebox.showerror("Fehler", f"Fehler beim Export:\n{e}")
@@ -847,7 +1368,8 @@ class InventurApp:
         
         context_menu = tk.Menu(self.root, tearoff=0)
         context_menu.add_command(label="🗑️ Löschen", command=lambda: self.delete_entry(item))
-        context_menu.add_command(label="✏️ Bearbeiten", command=lambda: self.edit_entry())
+        # Bearbeitungsfunktion temporär entfernt
+        # context_menu.add_command(label="✏️ Bearbeiten", command=lambda: self.edit_entry())
         
         try:
             context_menu.tk_popup(event.x_root, event.y_root)
@@ -855,7 +1377,7 @@ class InventurApp:
             context_menu.grab_release()
     
     def delete_entry(self, item_id):
-        """Löscht einen Eintrag"""
+        """Löscht einen Eintrag (V2)"""
         if not messagebox.askyesno("Löschen bestätigen", 
                                   "Möchten Sie diesen Eintrag wirklich löschen?"):
             return
@@ -865,9 +1387,11 @@ class InventurApp:
         if len(values) >= 2:
             charge = values[1]  # Charge ist in Spalte 1
             
-            # Entferne aus entsprechender Liste
-            self.inventur_data = [item for item in self.inventur_data if item['charge'] != charge]
-            self.nicht_gefunden_data = [item for item in self.nicht_gefunden_data if item['charge'] != charge]
+            # Entferne aus allen Listen
+            self.inventur_rollen_data = [item for item in self.inventur_rollen_data if item['charge'] != charge]
+            self.nicht_gefunden_rollen_data = [item for item in self.nicht_gefunden_rollen_data if item['charge'] != charge]
+            self.inventur_granulat_data = [item for item in self.inventur_granulat_data if item['charge'] != charge]
+            self.nicht_gefunden_granulat_data = [item for item in self.nicht_gefunden_granulat_data if item['charge'] != charge]
             
             # Speichere und aktualisiere
             self.save_to_excel()
@@ -877,33 +1401,43 @@ class InventurApp:
             self.logger.info(f"Eintrag gelöscht: {charge}")
     
     def edit_entry(self):
-        """Bearbeitet einen Eintrag"""
-        selection = self.tree.selection()
-        if not selection:
-            return
-        
-        messagebox.showinfo("Info", "Bearbeitungsfunktion wird in einer späteren Version implementiert.")
+        """Bearbeitet einen Eintrag (temporär deaktiviert)"""
+        messagebox.showinfo("Info", "Bearbeitungsfunktion ist temporär deaktiviert.")
+    
+    # find_item_by_charge temporär entfernt (für Bearbeitungsfunktion)
+    # def find_item_by_charge(self, charge):
+    #     """Findet einen Eintrag anhand der Charge in allen Listen"""
+    #     pass
     
     def undo_last_action(self):
-        """Macht die letzte Aktion rückgängig"""
+        """Macht die letzte Aktion rückgängig (V2)"""
         if not self.undo_stack:
             self.status_var.set("Nichts zum Rückgängigmachen")
             return
         
-        action, data = self.undo_stack.pop()
+        action, data, typ = self.undo_stack.pop()
         
         if action == 'add':
-            # Entferne letzten Eintrag
+            # Entferne letzten Eintrag basierend auf Typ
             charge = data['charge']
-            if data['status'] == 'gefunden':
-                self.inventur_data = [item for item in self.inventur_data if item['charge'] != charge]
-            else:
-                self.nicht_gefunden_data = [item for item in self.nicht_gefunden_data if item['charge'] != charge]
+            
+            if typ == 'ROLLE':
+                if data['status'] == 'gefunden':
+                    self.inventur_rollen_data = [item for item in self.inventur_rollen_data if item['charge'] != charge]
+                else:
+                    self.nicht_gefunden_rollen_data = [item for item in self.nicht_gefunden_rollen_data if item['charge'] != charge]
+            elif typ == 'GRANULAT':
+                if data['status'] == 'gefunden':
+                    self.inventur_granulat_data = [item for item in self.inventur_granulat_data if item['charge'] != charge]
+                else:
+                    self.nicht_gefunden_granulat_data = [item for item in self.nicht_gefunden_granulat_data if item['charge'] != charge]
             
             self.save_to_excel()
             self.update_list()
-            self.status_var.set(f"Eintrag rückgängig gemacht: {charge}")
-            self.logger.info(f"Undo: {charge}")
+            
+            typ_icon = "🔵" if typ == 'ROLLE' else "🟨"
+            self.status_var.set(f"{typ_icon} Eintrag rückgängig gemacht: {charge}")
+            self.logger.info(f"Undo {typ}: {charge}")
     
     def manual_save(self):
         """Manuelles Speichern"""
@@ -936,16 +1470,23 @@ class InventurApp:
         self.root.mainloop()
 
 
+# EditItemDialog temporär entfernt für Überarbeitung
+# class EditItemDialog:
+#     pass
+
+
 class NotFoundDialog:
-    """Dialog für nicht gefundene Waren"""
+    """Dialog für nicht gefundene Waren (V2 mit Typ-Auswahl)"""
     
     def __init__(self, parent, charge):
         self.result = None
+        self.selected_type = None
+        self.input_widgets = {}
         
         # Dialog-Fenster
         self.dialog = tk.Toplevel(parent)
-        self.dialog.title("⚠️ Ware nicht gefunden")
-        self.dialog.geometry("450x650")
+        self.dialog.title("⚠️ Ware nicht gefunden - Typ wählen")
+        self.dialog.geometry("550x750")  # Einheitliche Größe für alle Felder
         self.dialog.resizable(True, True)
         self.dialog.transient(parent)
         self.dialog.grab_set()
@@ -959,7 +1500,7 @@ class NotFoundDialog:
         self.dialog.wait_window()
     
     def create_widgets(self, charge):
-        """Erstellt Dialog-Widgets"""
+        """Erstellt Dialog-Widgets mit Typ-Auswahl"""
         main_frame = ttk.Frame(self.dialog, padding="20")
         main_frame.pack(fill=tk.BOTH, expand=True)
         
@@ -968,55 +1509,52 @@ class NotFoundDialog:
                                text=f"Ware mit Charge {charge} nicht gefunden!",
                                font=("Arial", 12, "bold"),
                                foreground="red")
-        title_label.pack(pady=(0, 20))
+        title_label.pack(pady=(0, 15))
         
         # Info
         info_label = ttk.Label(main_frame, 
-                              text="Bitte geben Sie die Daten manuell ein:",
+                              text="Wählen Sie zuerst den Warentyp:",
                               font=("Arial", 10))
-        info_label.pack(pady=(0, 15))
+        info_label.pack(pady=(0, 10))
         
-        # Eingabefelder
+        # Typ-Auswahl Frame
+        type_frame = ttk.LabelFrame(main_frame, text="Warentyp auswählen", padding="10")
+        type_frame.pack(fill=tk.X, pady=(0, 20))
+        
+        self.type_var = tk.StringVar(value="ROLLE")  # Standard: Rolle
+        
+        # Rolle Radio Button
+        rolle_radio = ttk.Radiobutton(type_frame, 
+                                     text="🔵 Rolle (mit Länge, Breite, Fach)",
+                                     variable=self.type_var, 
+                                     value="ROLLE",
+                                     command=self.on_type_change)
+        rolle_radio.pack(anchor=tk.W, pady=2)
+        
+        # Granulat Radio Button
+        granulat_radio = ttk.Radiobutton(type_frame, 
+                                        text="🟨 Granulat (mit Gewicht)",
+                                        variable=self.type_var, 
+                                        value="GRANULAT",
+                                        command=self.on_type_change)
+        granulat_radio.pack(anchor=tk.W, pady=2)
+        
+        # Basis-Eingabefelder
         self.charge_var = tk.StringVar(value=charge)
         self.material_var = tk.StringVar()
         self.kurztext_var = tk.StringVar()
-        self.laenge_var = tk.StringVar()
-        self.breite_var = tk.StringVar()
-        self.flaeche_var = tk.StringVar()
-        self.fach_var = tk.StringVar()
         self.bemerkung_var = tk.StringVar()
         
-        fields = [
-            ("Charge:", self.charge_var, False),
-            ("Material-Nummer:", self.material_var, True),
-            ("Materialkurztext:", self.kurztext_var, False),
-            ("Länge (m):", self.laenge_var, True),
-            ("Breite (mm):", self.breite_var, True),
-            ("Fläche (m²):", self.flaeche_var, True),
-            ("Fach:", self.fach_var, True),
-            ("Bemerkung:", self.bemerkung_var, False)
-        ]
+        # Basis-Felder erstellen
+        self.create_base_fields(main_frame)
         
-        for i, (label_text, var, required) in enumerate(fields):
-            # Frame für jedes Feld
-            field_frame = ttk.Frame(main_frame)
-            field_frame.pack(fill=tk.X, pady=3)
-            
-            # Label über dem Eingabefeld
-            display_text = label_text + " *" if required else label_text
-            label = ttk.Label(field_frame, text=display_text, font=("Arial", 9))
-            label.pack(anchor=tk.W)
-            
-            # Eingabefeld unter dem Label
-            entry = ttk.Entry(field_frame, textvariable=var, width=50, font=("Arial", 10))
-            entry.pack(fill=tk.X, pady=(1, 0))
-            
-            if i == 1:  # Fokus auf Material-Nummer
-                entry.focus_set()
+        # Container für dynamische Felder
+        self.dynamic_frame = ttk.LabelFrame(main_frame, text="Spezifische Daten", padding="10")
+        self.dynamic_frame.pack(fill=tk.X, pady=(10, 0))
         
         # Buttons
         button_frame = ttk.Frame(main_frame)
-        button_frame.pack(pady=(15, 10), fill=tk.X)
+        button_frame.pack(pady=(20, 10), fill=tk.X)
         
         # Zentriere Buttons
         inner_button_frame = ttk.Frame(button_frame)
@@ -1033,40 +1571,158 @@ class NotFoundDialog:
         # Enter-Binding
         self.dialog.bind('<Return>', lambda e: self.save_data())
         self.dialog.bind('<Escape>', lambda e: self.cancel())
+        
+        # Initial: Rolle-Felder anzeigen
+        self.on_type_change()
     
-    def save_data(self):
-        """Speichert die eingegebenen Daten"""
-        # Validierung
-        required_fields = [
-            (self.material_var.get().strip(), "Material-Nummer"),
-            (self.laenge_var.get().strip(), "Länge"),
-            (self.breite_var.get().strip(), "Breite"),
-            (self.flaeche_var.get().strip(), "Fläche"),
-            (self.fach_var.get().strip(), "Fach")
+    def create_base_fields(self, parent):
+        """Erstellt die Basis-Eingabefelder"""
+        base_frame = ttk.LabelFrame(parent, text="Grunddaten", padding="10")
+        base_frame.pack(fill=tk.X, pady=(0, 10))
+        
+        base_fields = [
+            ("Charge:", self.charge_var, False),
+            ("Material-Nummer:", self.material_var, True),
+            ("Materialkurztext:", self.kurztext_var, False),
+            ("Bemerkung:", self.bemerkung_var, False)
         ]
         
-        for value, field_name in required_fields:
-            if not value:
-                messagebox.showerror("Fehler", f"Bitte {field_name} eingeben")
-                return
+        for i, (label_text, var, required) in enumerate(base_fields):
+            field_frame = ttk.Frame(base_frame)
+            field_frame.pack(fill=tk.X, pady=3)
+            
+            display_text = label_text + " *" if required else label_text
+            label = ttk.Label(field_frame, text=display_text, font=("Arial", 9))
+            label.pack(anchor=tk.W)
+            
+            entry = ttk.Entry(field_frame, textvariable=var, width=50, font=("Arial", 10))
+            entry.pack(fill=tk.X, pady=(1, 0))
+            
+            if i == 1:  # Fokus auf Material-Nummer
+                entry.focus_set()
+    
+    def on_type_change(self):
+        """Wird aufgerufen wenn der Typ geändert wird"""
+        # Lösche alte dynamische Felder
+        for widget in self.dynamic_frame.winfo_children():
+            widget.destroy()
+        self.input_widgets.clear()
+        
+        selected_type = self.type_var.get()
+        
+        if selected_type == "ROLLE":
+            self.create_rolle_fields()
+        elif selected_type == "GRANULAT":
+            self.create_granulat_fields()
+    
+    def create_rolle_fields(self):
+        """Erstellt Eingabefelder für Rollen"""
+        # Rollen-spezifische Variablen
+        self.laenge_var = tk.StringVar()
+        self.breite_var = tk.StringVar()
+        self.flaeche_var = tk.StringVar()
+        self.fach_var = tk.StringVar()
+        
+        rolle_fields = [
+            ("Länge (m):", self.laenge_var, True),
+            ("Breite (mm):", self.breite_var, True),
+            ("Fläche (m²):", self.flaeche_var, True),
+            ("Fach:", self.fach_var, True)
+        ]
+        
+        for label_text, var, required in rolle_fields:
+            field_frame = ttk.Frame(self.dynamic_frame)
+            field_frame.pack(fill=tk.X, pady=3)
+            
+            display_text = label_text + " *" if required else label_text
+            label = ttk.Label(field_frame, text=display_text, font=("Arial", 9))
+            label.pack(anchor=tk.W)
+            
+            entry = ttk.Entry(field_frame, textvariable=var, width=50, font=("Arial", 10))
+            entry.pack(fill=tk.X, pady=(1, 0))
+            
+            self.input_widgets[label_text] = entry
+    
+    def create_granulat_fields(self):
+        """Erstellt Eingabefelder für Granulat"""
+        # Granulat-spezifische Variablen
+        self.frei_verwendbar_var = tk.StringVar()
+        
+        granulat_fields = [
+            ("Frei verwendbar (KG):", self.frei_verwendbar_var, True)
+        ]
+        
+        for label_text, var, required in granulat_fields:
+            field_frame = ttk.Frame(self.dynamic_frame)
+            field_frame.pack(fill=tk.X, pady=3)
+            
+            display_text = label_text + " *" if required else label_text
+            label = ttk.Label(field_frame, text=display_text, font=("Arial", 9))
+            label.pack(anchor=tk.W)
+            
+            entry = ttk.Entry(field_frame, textvariable=var, width=50, font=("Arial", 10))
+            entry.pack(fill=tk.X, pady=(1, 0))
+            
+            self.input_widgets[label_text] = entry
+    
+    def save_data(self):
+        """Speichert die eingegebenen Daten basierend auf dem gewählten Typ"""
+        selected_type = self.type_var.get()
+        
+        # Basis-Validierung
+        if not self.material_var.get().strip():
+            messagebox.showerror("Fehler", "Bitte Material-Nummer eingeben")
+            return
         
         try:
-            # Konvertiere numerische Werte
-            laenge = float(self.laenge_var.get().replace(',', '.'))
-            breite = int(self.breite_var.get())
-            flaeche = float(self.flaeche_var.get().replace(',', '.'))
-            
-            self.result = {
+            # Basis-Daten
+            result_data = {
                 'charge': self.charge_var.get().strip(),
                 'material': self.material_var.get().strip(),
                 'kurztext': self.kurztext_var.get().strip(),
-                'laenge': laenge,
-                'breite': breite,
-                'flaeche': flaeche,
-                'fach': self.fach_var.get().strip(),
-                'bemerkung': self.bemerkung_var.get().strip()
+                'bemerkung': self.bemerkung_var.get().strip(),
+                'typ': selected_type,
+                'status': 'nicht_gefunden'
             }
             
+            if selected_type == "ROLLE":
+                # Rollen-Validierung
+                required_rolle_fields = [
+                    (self.laenge_var.get().strip(), "Länge"),
+                    (self.breite_var.get().strip(), "Breite"),
+                    (self.flaeche_var.get().strip(), "Fläche"),
+                    (self.fach_var.get().strip(), "Fach")
+                ]
+                
+                for value, field_name in required_rolle_fields:
+                    if not value:
+                        messagebox.showerror("Fehler", f"Bitte {field_name} eingeben")
+                        return
+                
+                # Konvertiere Rollen-Werte
+                # Für nicht gefundene Rollen: Alle Werte sind manuell eingegeben
+                breite_eingegeben = int(self.breite_var.get())
+                result_data.update({
+                    'laenge': float(self.laenge_var.get().replace(',', '.')),
+                    'breite_original': breite_eingegeben,  # Manuell eingegeben
+                    'breite_kontrolliert': breite_eingegeben,  # Gleicher Wert, da manuell
+                    'flaeche': float(self.flaeche_var.get().replace(',', '.')),
+                    'fach_original': '',  # Leer, da nicht aus Arbeitstabelle
+                    'fach_kontrolliert': self.fach_var.get().strip()  # Manuell eingegeben
+                })
+                
+            elif selected_type == "GRANULAT":
+                # Granulat-Validierung
+                if not self.frei_verwendbar_var.get().strip():
+                    messagebox.showerror("Fehler", "Bitte Frei verwendbar (KG) eingeben")
+                    return
+                
+                # Konvertiere Granulat-Werte
+                result_data.update({
+                    'frei_verwendbar_kg': float(self.frei_verwendbar_var.get().replace(',', '.'))
+                })
+            
+            self.result = result_data
             self.dialog.destroy()
             
         except ValueError:

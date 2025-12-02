@@ -8,3 +8,5 @@ Original-Arbeitstabelle.XLSX
 *.log
 Auftragsbeschreibung.md1
 ClaudeCode_Inventur_Prompt_1.md
+ClaudeCode_Inventur_Erweiterung_V2.md
+create_sample_arbeitstabelle.py
