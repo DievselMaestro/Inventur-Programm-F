@@ -28,32 +28,11 @@ class InventurApp:
     def __init__(self):
         """Initialisiert die Inventur-Anwendung"""
         self.root = tk.Tk()
-        self.setup_logging()
-        self.setup_paths()
-        self.load_config()
-        self.init_data()
-        self.setup_ui()
-        self.load_existing_inventur()
-        self.bind_shortcuts()
         
-    def setup_logging(self):
-        """Konfiguriert das Logging-System"""
-        if not os.path.exists('config'):
-            os.makedirs('config')
-        
-        logging.basicConfig(
-            filename='config/inventur.log',
-            level=logging.INFO,
-            format='%(asctime)s - %(levelname)s - %(message)s',
-            datefmt='%d.%m.%Y %H:%M:%S'
-        )
-        self.logger = logging.getLogger(__name__)
-        self.logger.info("Inventur-Programm gestartet")
-    
-    def setup_paths(self):
-        """Definiert die Dateipfade"""
-        self.data_dir = Path('data')
-        self.config_dir = Path('config')
+        # EXE-kompatible Pfade definieren (ZUERST!)
+        self.base_dir = Path(self.get_base_path())
+        self.data_dir = self.base_dir / 'data'
+        self.config_dir = self.base_dir / 'config'
         self.arbeitstabelle_path = self.data_dir / 'Arbeitstabelle.xlsx'
         self.inventur_rollen_path = self.data_dir / 'Inventur_Rollen.xlsx'
         self.inventur_granulat_path = self.data_dir / 'Inventur_Granulat.xlsx'
@@ -62,6 +41,38 @@ class InventurApp:
         self.data_dir.mkdir(exist_ok=True)
         self.config_dir.mkdir(exist_ok=True)
         (self.data_dir / 'backups').mkdir(exist_ok=True)
+        
+        # Jetzt Logging setup (nachdem Pfade definiert sind)
+        self.setup_logging()
+        
+        self.load_config()
+        self.init_data()
+        self.setup_ui()
+        self.load_existing_inventur()
+        self.bind_shortcuts()
+        
+    def get_base_path(self):
+        """Gibt den Basispfad zurück - funktioniert sowohl für .py als auch .exe"""
+        if getattr(sys, 'frozen', False):
+            # Läuft als EXE (PyInstaller)
+            return os.path.dirname(sys.executable)
+        else:
+            # Läuft als Python-Skript
+            return os.path.dirname(os.path.abspath(__file__))
+    
+    def setup_logging(self):
+        """Konfiguriert das Logging-System"""
+        log_file = self.data_dir / 'inventur.log'
+        logging.basicConfig(
+            level=logging.INFO,
+            format='%(asctime)s - %(levelname)s - %(message)s',
+            handlers=[
+                logging.FileHandler(log_file, encoding='utf-8'),
+                logging.StreamHandler()
+            ]
+        )
+        self.logger = logging.getLogger(__name__)
+        self.logger.info("Inventur-Programm V2 gestartet")
     
     def load_config(self):
         """Lädt die Konfigurationsdatei"""
@@ -81,7 +92,7 @@ class InventurApp:
         
         try:
             if config_path.exists():
-                with open(config_path, 'r', encoding='utf-8') as f:
+                with open(config_path, 'r', encoding='utf-8-sig') as f:
                     self.config = json.load(f)
             else:
                 self.config = default_config

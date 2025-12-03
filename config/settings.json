@@ -3,6 +3,9 @@
   "schriftgroesse": 12,
   "farbe_gefunden": "#E8F5E8",
   "farbe_nicht_gefunden": "#FFF2CC",
-  "farbe_fehler": "#FFE6E6",
+  "farbe_rolle_bg": "#E3F2FD",
+  "farbe_rolle_text": "#1976D2",
+  "farbe_granulat_bg": "#FFF9C4",
+  "farbe_granulat_text": "#F57F17",
   "vollbild": true
 }
