@@ -8,8 +8,8 @@ Desktop-Anwendung für Lagerpflege/Inventur mit Barcodescanner-Integration
 Unterstützt Rollen UND Granulate mit separaten Excel-Dateien
 Entwickelt für Windows 11, Python 3.11+
 
-Autor: Cascade AI
-Datum: Dezember 2024
+Autor: Christian
+Datum: Dezember 2025
 Version: 2.0
 """
 
